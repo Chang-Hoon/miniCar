@@ -1,0 +1,17 @@
+# 빌드 결과
+bin/
+obj/
+
+# Visual Studio / Rider / VS Code
+.vs/
+.idea/
+*.user
+*.suo
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# 커밋 메시지 초안 (git commit -F 로 사용)
+commit_msg_*.txt

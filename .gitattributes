@@ -1,0 +1,14 @@
+# 줄바꿈: 저장소에는 LF로 저장하고, 체크아웃할 때 OS에 맞게
+* text=auto
+
+*.cs       text diff=csharp
+*.csproj   text
+*.config   text
+*.manifest text
+*.md       text
+*.sh       text eol=lf
+
+*.ico binary
+*.png binary
+*.gif binary
+*.exe binary
