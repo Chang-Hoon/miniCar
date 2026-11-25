@@ -72,6 +72,7 @@ internal sealed class AppSettings
 
     // 트랙
     [Setting] public double TrackWidth { get; set; } = 8;
+    [Setting] public bool AutoFollowTrack { get; set; } = true;
     [Setting] public string TrackColor { get; set; } = "#FFB300";
     [Setting] public string TrackName { get; set; } = "";
 

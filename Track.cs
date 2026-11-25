@@ -57,15 +57,23 @@ internal sealed class Track
     /// <summary>마지막 저장/불러오기 이후 바뀌었는지</summary>
     public bool Modified { get; set; }
     public bool IsEmpty => Strokes.Count == 0;
+    /// <summary>선이 바뀔 때마다 1씩 늘어남 (따라 달릴 길을 다시 만들지 판단)</summary>
+    public int Version { get; private set; }
 
     /// <summary>선이 추가·삭제되면 (다시 그리기용)</summary>
     public event Action? Changed;
+
+    private void Touch()
+    {
+        Version++;
+        Changed?.Invoke();
+    }
 
     public void Add(TrackStroke stroke)
     {
         Strokes.Add(stroke);
         Modified = true;
-        Changed?.Invoke();
+        Touch();
     }
 
     public bool RemoveLast()
@@ -73,7 +81,7 @@ internal sealed class Track
         if (Strokes.Count == 0) return false;
         Strokes.RemoveAt(Strokes.Count - 1);
         Modified = true;
-        Changed?.Invoke();
+        Touch();
         return true;
     }
 
@@ -91,7 +99,7 @@ internal sealed class Track
         if (best < 0) return false;
         Strokes.RemoveAt(best);
         Modified = true;
-        Changed?.Invoke();
+        Touch();
         return true;
     }
 
@@ -101,7 +109,7 @@ internal sealed class Track
         Strokes.Clear();
         Name = null;
         Modified = false;
-        Changed?.Invoke();
+        Touch();
     }
 
     /// <summary>다른 트랙 내용으로 바꿈 (불러오기)</summary>
@@ -111,7 +119,7 @@ internal sealed class Track
         Strokes.AddRange(strokes);
         Name = name;
         Modified = false;
-        Changed?.Invoke();
+        Touch();
     }
 
     public RectangleF Bounds

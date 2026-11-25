@@ -242,7 +242,7 @@ internal sealed class TrayApp : ApplicationContext
         // 계기판 폭이 좁으므로 짧게 (B3 = 부스트 3단)
         string label =
             _paused ? "정지" :
-            _car.Mode == DriveMode.Auto ? (_car.Drifting ? "드리프트" : "자율") :
+            _car.Mode == DriveMode.Auto ? (_car.Drifting ? "드리프트" : _car.FollowingTrack ? "트랙" : "자율") :
             _parked ? "주차" :
             _idle ? "대기" :
             _car.BrakeSliding ? "슬라이드" :
@@ -470,6 +470,7 @@ internal sealed class TrayApp : ApplicationContext
         _mover.ScrollNotchesPerSecond = _settings.ScrollNotchesPerSecond;
         _mover.UseRealInput = _settings.ScrollMethod != "Message";
         _trackOverlay.WidthLogical = (float)_settings.TrackWidth;
+        _car.FollowTrack = _settings.AutoFollowTrack;
         if (_trackOverlay.Color.ToArgb() != _settings.GetTrackColor().ToArgb())
         {
             _trackOverlay.Color = _settings.GetTrackColor();
@@ -1027,6 +1028,7 @@ internal sealed class TrayApp : ApplicationContext
         items.Add(load);
         items.Add(delete);
         items.Add(new ToolStripSeparator());
+        items.Add(new ToolStripMenuItem("자율 주행은 트랙을 따라 달리기", null, (_, _) => SetFollowTrack(!_settings.AutoFollowTrack)) { Checked = _settings.AutoFollowTrack });
         items.Add(new ToolStripMenuItem("트랙 폴더 열기", null, (_, _) => OpenTrackFolder()));
     }
 
@@ -1132,6 +1134,15 @@ internal sealed class TrayApp : ApplicationContext
         _settings.Save();
         Flash("트랙을 비웠습니다");
         UpdateMenu();
+    }
+
+    private void SetFollowTrack(bool on)
+    {
+        _settings.AutoFollowTrack = on;
+        _settings.Save();
+        _car.FollowTrack = on;
+        Flash(on ? "자율 주행: 트랙을 따라 달림" : "자율 주행: 화면 전체를 돌아다님 (트랙은 벽)");
+        WakeLoop();
     }
 
     private void OpenTrackFolder()

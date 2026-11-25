@@ -22,7 +22,7 @@ internal struct ManualInput
 /// 차의 위치/방향 시뮬레이션. 좌표는 가상 화면 물리 픽셀, 각도는 화면 기준
 /// (0° = 오른쪽, 90° = 아래쪽, 시계 방향 증가).
 /// </summary>
-internal sealed class CarController
+internal sealed partial class CarController
 {
     private const double AutoTurnRate = 540;    // 표시 각도 회전 속도 (°/s)
     private const double TopDownTurnRate = 600;
@@ -146,7 +146,7 @@ internal sealed class CarController
     public bool BrakeSliding => _slidePhase == 1;
 
     /// <summary>지금 드리프트 중인지 (자율 주행 드리프트 또는 수동 주행 부스트 드리프트, 타이어 자국·연기 표시용)</summary>
-    public bool Drifting => _drifting || _manualDrifting;
+    public bool Drifting => _drifting || _manualDrifting || _followDrifting;
     /// <summary>차체 방향 - 진행 방향 (드리프트 슬립각, °)</summary>
     public double SlipAngle { get; private set; }
 
@@ -172,6 +172,7 @@ internal sealed class CarController
         _vx = _vy = 0;
         CancelDrift();
         _recheckOverlap = true;
+        RequestFollowRepick();
     }
 
     private void CancelDrift()
@@ -179,6 +180,7 @@ internal sealed class CarController
         if (_drifting) DisplayAngle = Normalize(Heading + SlipAngle);
         _drifting = false;
         _manualDrifting = false;
+        _followDrifting = false;
         _slidePhase = 0;
         SlipAngle = 0;
     }
@@ -227,6 +229,8 @@ internal sealed class CarController
     {
         if (mode == Mode) return;
         CancelDrift();
+        RequestFollowRepick();
+        _fSpeed = 0;
         Mode = mode;
         Braking = Reversing = false;
         ResetBoost();
@@ -364,6 +368,7 @@ internal sealed class CarController
         _vx = _vy = 0;
         Braking = Reversing = false;
         _recheckOverlap = true; // 선 위에 내려놓아도 빠져나올 수 있게
+        RequestFollowRepick();
         return true;
     }
 
@@ -375,6 +380,7 @@ internal sealed class CarController
         if (speed < 120 * dpi / 96.0) return; // 살짝 움직인 건 던지기로 보지 않음
 
         CancelDrift();
+        RequestFollowRepick();
         Heading = Normalize(Math.Atan2(vy, vx) * 180 / Math.PI);
         if (Style == ControlStyle.Car) DisplayAngle = Heading;
         if (Mode == DriveMode.Manual)
@@ -396,7 +402,7 @@ internal sealed class CarController
         if (Mode == DriveMode.Auto)
         {
             UpdateAuto(dt, speed);
-            DisplayAngle = _drifting
+            DisplayAngle = _drifting || _followDrifting
                 ? Normalize(Heading + SlipAngle)                         // 드리프트: 차체가 진행 방향보다 더 돌아감
                 : Approach(DisplayAngle, Heading, AutoTurnRate * dt);
         }
@@ -444,6 +450,11 @@ internal sealed class CarController
         X = bx;
         Y = by;
 
+        if (Mode == DriveMode.Auto && _fPath != null)
+        {
+            ReverseFollow(); // 트랙을 따라가다 다른 선에 막히면 되돌아감
+            return;
+        }
         if (Mode == DriveMode.Auto)
         {
             CancelDrift();
@@ -527,6 +538,8 @@ internal sealed class CarController
 
     private void UpdateAuto(double dt, double speed)
     {
+        if (UpdateFollow(dt, speed)) return; // 트랙이 있으면 트랙을 따라 달림
+
         if (DriftEnabled)
         {
             if (!_drifting) TryStartDrift(speed);
