@@ -18,6 +18,18 @@ internal sealed partial class CarController
     private const double FollowTurnRate = 300;      // 따라 달릴 때 최대 회전 속도 (°/s)
     private const double FollowStep = 6;            // 길 점 간격 (px)
 
+    /// <summary>트랙을 따라 달리다 코너(방향 전환)에서 부스터를 켜고 드리프트 (BoostDrift 설정)</summary>
+    public bool FollowBoostDrift { get; set; } = true;
+    private const double CornerLook = 110;          // 이만큼 앞의 길 방향과 비교해 코너 판단 (px)
+    private const double CornerMinBend = 40;        // 이 각도 이상 꺾이면 코너 (°)
+    private const double CornerHoldSeconds = 0.35;  // 코너를 지나도 잠깐 부스터 유지
+    private const double CornerTurnRate = 480;      // 드리프트 중 최대 회전 속도 (°/s)
+    private double _fCornerHold;
+    private int _fCornerStage, _fCornerSign = 1;
+
+    /// <summary>테스트용: 코너에서 부스터 드리프트를 시작한 횟수</summary>
+    internal int FollowBoostCount;
+
     private List<PointF>? _fPath;   // 따라갈 길 (닫힌 고리)
     private double[] _fCum = Array.Empty<double>();
     private double _fLen;
@@ -38,6 +50,8 @@ internal sealed partial class CarController
     {
         if (_fPath == null && !_followDrifting) return;
         _fPath = null;
+        _fCornerHold = 0;
+        if (Mode == DriveMode.Auto) { BoostStage = 0; Boosting = false; }
         if (_followDrifting)
         {
             DisplayAngle = Normalize(Heading + SlipAngle);
@@ -79,23 +93,53 @@ internal sealed partial class CarController
         }
         _fS = s;
 
+        // 코너 감지: 앞쪽 길이 크게 꺾이면 부스터를 켜고 드리프트로 돎
+        var (c0x, c0y) = TangentAt(s);
+        var (c1x, c1y) = TangentAt(s + _fDir * CornerLook);
+        double cornerBend = AngleDiff(Math.Atan2(c1y, c1x) * 180 / Math.PI, Math.Atan2(c0y, c0x) * 180 / Math.PI);
+        _fReverseCooldown = Math.Max(0, _fReverseCooldown - dt);
+        bool cornerAhead = FollowBoostDrift && DriftEnabled && Math.Abs(cornerBend) >= CornerMinBend
+                           && _fReverseCooldown <= 0 && _fSpeed > speed * 0.45;
+        if (cornerAhead)
+        {
+            int stage = Math.Abs(cornerBend) >= 130 ? 3 : Math.Abs(cornerBend) >= 80 ? 2 : 1;
+            if (_fCornerHold <= 0) { _fCornerStage = 0; FollowBoostCount++; }
+            _fCornerStage = Math.Max(_fCornerStage, Math.Min(stage, BoostMultipliers.Length));
+            _fCornerSign = Math.Sign(cornerBend);
+            _fCornerHold = CornerHoldSeconds;
+        }
+        else _fCornerHold = Math.Max(0, _fCornerHold - dt);
+        bool corner = _fCornerHold > 0 && _fCornerStage > 0;
+        BoostStage = corner ? _fCornerStage : 0;
+        Boosting = corner;
+        double turnLimit = corner ? CornerTurnRate : FollowTurnRate;
+
         // 앞쪽 목표점을 향해 핸들 (pure pursuit)
         var target = PointAt(s + _fDir * look);
         double desired = Math.Atan2(target.Y - Y, target.X - X) * 180 / Math.PI;
         double diff = AngleDiff(desired, Heading);
-        double maxStep = FollowTurnRate * dt;
+        double maxStep = turnLimit * dt;
         double turn = Math.Max(-maxStep, Math.Min(maxStep, diff));
         Heading = Normalize(Heading + turn);
 
-        // 굽은 곳·크게 돌아야 할 때는 감속
-        var (t1x, t1y) = TangentAt(s);
-        var (t2x, t2y) = TangentAt(s + _fDir * 60);
-        double bend = Math.Abs(AngleDiff(Math.Atan2(t2y, t2x) * 180 / Math.PI, Math.Atan2(t1y, t1x) * 180 / Math.PI)) * Math.PI / 180;
-        double curvature = bend / 60;
-        double vCap = curvature > 1e-4 ? (FollowTurnRate * Math.PI / 180) / curvature : double.MaxValue;
+        // 굽은 곳·크게 돌아야 할 때는 감속: 앞쪽 150px 안의 굽은 곳들을 보고, 그 지점까지 감속할 수 있는 속도로 제한
+        double decel = speed * 4;
+        double vCap = double.MaxValue;
+        for (int k = 0; k <= 6; k++)
+        {
+            double sk = s + _fDir * k * 25;
+            var (ax, ay) = TangentAt(sk);
+            var (bx, by) = TangentAt(sk + _fDir * 50);
+            double bendK = Math.Abs(AngleDiff(Math.Atan2(by, bx) * 180 / Math.PI, Math.Atan2(ay, ax) * 180 / Math.PI)) * Math.PI / 180;
+            if (bendK < 1e-4) continue;
+            double capK = (turnLimit * Math.PI / 180) / (bendK / 50);
+            vCap = Math.Min(vCap, Math.Sqrt(capK * capK + 2 * decel * k * 25));
+        }
         if (Math.Abs(diff) > 90) vCap = Math.Min(vCap, speed * 0.08); // 되돌아갈 때: 거의 제자리에서 돌기
         else if (Math.Abs(diff) > 60) vCap = Math.Min(vCap, speed * 0.35);
-        double vTarget = Math.Min(speed, Math.Max(speed * 0.25, vCap));
+        // 코너에서는 부스터 배율만큼 빠르게 (돌 수 있는 속도 안에서)
+        double top = corner ? speed * BoostMultipliers[_fCornerStage - 1] : speed;
+        double vTarget = Math.Min(top, Math.Max(Math.Min(speed * 0.1, 40), vCap));
         double rate = vTarget < _fSpeed ? speed * 4 : speed * 1.5;
         _fSpeed = _fSpeed < vTarget ? Math.Min(vTarget, _fSpeed + rate * dt) : Math.Max(vTarget, _fSpeed - rate * dt);
 
@@ -106,7 +150,6 @@ internal sealed partial class CarController
         double nx = X + vx * dt, ny = Y + vy * dt;
         bool blocked = (Math.Abs(vx) > 1e-6 && !EdgeFreeX(nx, Y, Math.Sign(vx), hx, hy)) ||
                        (Math.Abs(vy) > 1e-6 && !EdgeFreeY(nx, ny, Math.Sign(vy), hx, hy));
-        _fReverseCooldown = Math.Max(0, _fReverseCooldown - dt);
         if (blocked) ReverseFollow();
         else { X = nx; Y = ny; }
         Braking = false;
@@ -115,8 +158,12 @@ internal sealed partial class CarController
         // 짧게 흔들리는 핸들은 무시하도록 회전 속도를 부드럽게 (0.2초)
         double turnRate = dt > 0 ? turn / dt : 0;
         _fTurnRate += (turnRate - _fTurnRate) * Math.Min(1, dt / 0.2);
-        double wantSlip = _fSpeed > speed * 0.55 && Math.Abs(_fTurnRate) > 150
-            ? Math.Sign(_fTurnRate) * Math.Min(DriftSlipDegrees, (Math.Abs(_fTurnRate) - 150) * 0.18)
+        double wantSlip =
+            corner && _fSpeed > speed * 0.45
+                // 부스터 드리프트: 꺾이는 정도만큼 차체가 안쪽으로 돌아감 (최대 DriftSlipDegrees)
+                ? _fCornerSign * DriftSlipDegrees * (0.55 + 0.45 * Math.Min(1, Math.Abs(cornerBend) / 120))
+            : _fSpeed > speed * 0.55 && Math.Abs(_fTurnRate) > 150
+                ? Math.Sign(_fTurnRate) * Math.Min(DriftSlipDegrees, (Math.Abs(_fTurnRate) - 150) * 0.18)
             : 0;
         double slipStep = (Math.Abs(wantSlip) > Math.Abs(SlipAngle) ? SlipBuildRate : SlipRecoverRate) * dt;
         SlipAngle = Math.Abs(wantSlip - SlipAngle) <= slipStep ? wantSlip : SlipAngle + Math.Sign(wantSlip - SlipAngle) * slipStep;
@@ -183,18 +230,29 @@ internal sealed partial class CarController
             // 선을 감싸는 길: 한쪽 옆 → 끝에서 반원 U턴 → 반대쪽 옆 → 시작에서 반원 U턴
             path = new List<PointF>();
             if (pts.Count == 1) pts.Add(new PointF(pts[0].X + 0.5f, pts[0].Y));
+            // 끝을 감쌀 때는 선 끝을 지나 차 길이만큼 더 나간 뒤 반원으로 돌아서, 끝을 크게 돌아 나가게 함
+            double ext = HalfLength * 1.6;
+            var (ex, ey) = Tangent(pts, pts.Count - 1, false);
+            var (sx, sy) = Tangent(pts, 0, false);
+            var endTip = new PointF(pts[pts.Count - 1].X + (float)(ex * ext), pts[pts.Count - 1].Y + (float)(ey * ext));
+            var startTip = new PointF(pts[0].X - (float)(sx * ext), pts[0].Y - (float)(sy * ext));
             path.AddRange(Offset(pts, off, false));
-            AddCap(path, pts[pts.Count - 1], Tangent(pts, pts.Count - 1, false), off);
+            AddCap(path, endTip, (ex, ey), off);
             var back = Offset(pts, -off, false);
             back.Reverse();
             path.AddRange(back);
-            var (sx, sy) = Tangent(pts, 0, false);
-            AddCap(path, pts[0], (-sx, -sy), off);
+            AddCap(path, startTip, (-sx, -sy), off);
         }
 
-        // 너무 가까운 점 정리 + 누적 길이
+        // 너무 가까운 점 정리 + 누적 길이.
+        // 안쪽으로 꺾인 모서리에서는 띄운 길이 반대쪽 변에 너무 붙거나 꼬이므로(제비꼬리 모양),
+        // 원래 선에서 충분히 떨어지지 않은 점은 버린다.
         var clean = new List<PointF>();
-        foreach (var p in path) if (clean.Count == 0 || Dist(clean[clean.Count - 1], p) >= 1.5) clean.Add(p);
+        foreach (var p in path)
+        {
+            if (best.Distance(p.X, p.Y, out _, out _) < off * 0.92) continue;
+            if (clean.Count == 0 || Dist(clean[clean.Count - 1], p) >= 1.5) clean.Add(p);
+        }
         if (clean.Count < 3) return;
         _fPath = clean;
         _fCum = new double[clean.Count + 1];
@@ -206,9 +264,9 @@ internal sealed partial class CarController
     private static void AddCap(List<PointF> path, PointF center, (double x, double y) t, double r)
     {
         double a0 = Math.Atan2(t.x, -t.y); // 법선 (-ty, tx) 방향의 각도
-        for (int i = 1; i < 14; i++)
+        for (int i = 0; i <= 18; i++)
         {
-            double a = a0 - Math.PI * i / 14; // 법선 → 진행 방향 → 반대 법선
+            double a = a0 - Math.PI * i / 18; // 법선 → 진행 방향 → 반대 법선
             path.Add(new PointF(center.X + (float)(Math.Cos(a) * r), center.Y + (float)(Math.Sin(a) * r)));
         }
     }

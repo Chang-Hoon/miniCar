@@ -174,7 +174,7 @@ internal sealed class TrayApp : ApplicationContext
                 else _car.Update(dt, dpi, input);
                 UpdateIdle(now, input);
 
-                if (_car.BoostStage > _lastBoostStage)
+                if (_car.Mode == DriveMode.Manual && _car.BoostStage > _lastBoostStage) // 자율 주행 코너 부스터는 알리지 않음
                     Flash(!_car.Launching ? $"부스트 {_car.BoostStage}단" : _car.LaunchedFromStop ? $"부스터 {_car.BoostStage}단 출발!" : $"부스터 {_car.BoostStage}단 업!");
                 _lastBoostStage = _car.BoostStage;
                 monitor = _layout.MonitorAt(_car.X, _car.Y);
@@ -195,6 +195,7 @@ internal sealed class TrayApp : ApplicationContext
             _carWindow.Present(hBitmap, new Size(side, side), topLeft);
 
             UpdateSkids(dt, dpi);
+            UpdateOdometer(dpi);
             _osd.Tick(dt, _car.X, _car.Y, side, _layout.AreaOf(monitor), dpi);
             UpdateHud(monitor, dpi);
         }
@@ -249,11 +250,47 @@ internal sealed class TrayApp : ApplicationContext
             _car.Reversing ? "후진" :
             _car.BoostStage > 0 ? $"B{_car.BoostStage}" :
             "수동";
-        int stage = _car.Mode == DriveMode.Manual && !_car.Reversing ? _car.BoostStage : 0;
-        double[] multipliers = _car.Mode == DriveMode.Manual ? _car.BoostMultipliers : Array.Empty<double>();
+        int stage = (_car.Mode == DriveMode.Manual && !_car.Reversing) || (_car.Mode == DriveMode.Auto && _car.Boosting) ? _car.BoostStage : 0;
+        double[] multipliers = _car.Mode == DriveMode.Manual ? _car.BoostMultipliers
+            : _car.FollowingTrack ? _car.BoostMultipliers.Take(3).ToArray() // 코너 부스터는 3단까지
+            : Array.Empty<double>();
         float k = _sprite.ScaleFor(dpi);
         _hud.Tick(label, stage, _car.Speed * 96.0 / dpi, _car.SpeedLogical, multipliers,
-            _car.X, _car.Y, 27 * k + 4 * dpi / 96.0, _layout.AreaOf(monitor), dpi);
+            _car.X, _car.Y, 27 * k + 4 * dpi / 96.0, _layout.AreaOf(monitor), dpi, FormatDistance(_odometer));
+    }
+
+    // ───────────────────── 주행거리 ─────────────────────
+
+    private double _odometer;          // 이번 실행에서 달린 거리 (화면 배율 100% 기준 px)
+    private double _odoX = double.NaN, _odoY;
+
+    /// <summary>차가 스스로 달린 거리만 더함 (마우스로 끌기·주차 중 창 옮기기·멈춤은 제외)</summary>
+    private void UpdateOdometer(int dpi)
+    {
+        bool counting = !_carWindow.Dragging && !_paused && !_parked && !_editing;
+        if (counting && !double.IsNaN(_odoX))
+        {
+            double d = Math.Sqrt((_car.X - _odoX) * (_car.X - _odoX) + (_car.Y - _odoY) * (_car.Y - _odoY)) * 96.0 / dpi;
+            if (d < 400) _odometer += d; // 모니터 구성 변경 등으로 순간 이동한 경우는 빼기
+        }
+        _odoX = _car.X;
+        _odoY = _car.Y;
+    }
+
+    /// <summary>차 길이 = 4.5 m 로 환산한 거리 표시 (예: 380 m, 1.24 km)</summary>
+    internal static string FormatDistance(double logicalPx, int carLength) =>
+        FormatMeters(logicalPx * 4.5 / Math.Max(1, carLength));
+
+    internal static string FormatMeters(double m) =>
+        m < 1000 ? $"{m:0} m" : m < 100_000 ? $"{m / 1000:0.00} km" : $"{m / 1000:0.0} km";
+
+    private string FormatDistance(double logicalPx) => FormatDistance(logicalPx, _settings.CarLength);
+
+    private void ResetOdometer()
+    {
+        _odometer = 0;
+        Flash("주행거리 0 m");
+        WakeLoop();
     }
 
     /// <summary>부스트 단계 → 불꽃 세기 (1~2단 / 3~4단 / 5~7단 / 8단 이상)</summary>
@@ -471,6 +508,7 @@ internal sealed class TrayApp : ApplicationContext
         _mover.UseRealInput = _settings.ScrollMethod != "Message";
         _trackOverlay.WidthLogical = (float)_settings.TrackWidth;
         _car.FollowTrack = _settings.AutoFollowTrack;
+        _car.FollowBoostDrift = _settings.TrackBoostDrift;
         if (_trackOverlay.Color.ToArgb() != _settings.GetTrackColor().ToArgb())
         {
             _trackOverlay.Color = _settings.GetTrackColor();
@@ -679,6 +717,7 @@ internal sealed class TrayApp : ApplicationContext
         }
         _keyGuideItem = new ToolStripMenuItem("키 안내 보기 (차 클릭으로도 전환)", null, (_, _) => SetKeyGuide(!_settings.ShowKeyGuide));
         _speedHudItem = new ToolStripMenuItem("속도 표시", null, (_, _) => SetSpeedHud(!_settings.ShowSpeedHud));
+        var odoResetItem = new ToolStripMenuItem("주행거리 0으로", null, (_, _) => ResetOdometer());
         _headlightItem = new ToolStripMenuItem("헤드라이트", null, (_, _) => ToggleHeadlights());
         var lookMenu = new ToolStripMenuItem("차 디자인");
         lookMenu.DropDownItems.AddRange(new ToolStripItem[] { _designGtItem, _designClassicItem, new ToolStripSeparator(), colorMenu });
@@ -700,7 +739,7 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.AddRange(new ToolStripItem[]
         {
             _hideItem, new ToolStripSeparator(),
-            _pauseItem, _manualItem, styleMenu, lookMenu, _headlightItem, _keyGuideItem, _speedHudItem, new ToolStripSeparator(),
+            _pauseItem, _manualItem, styleMenu, lookMenu, _headlightItem, _keyGuideItem, _speedHudItem, odoResetItem, new ToolStripSeparator(),
             _fasterItem, _slowerItem, new ToolStripSeparator(),
             _trackEditItem, _trackMenu, new ToolStripSeparator(),
             fullscreenMenu,

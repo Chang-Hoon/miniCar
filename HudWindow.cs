@@ -12,7 +12,7 @@ namespace miniCar;
 /// </summary>
 internal sealed class HudWindow : LayeredWindow
 {
-    public readonly record struct State(string Label, int StageColor, double Speed, double ScaleMax, double[] Ticks);
+    public readonly record struct State(string Label, int StageColor, double Speed, double ScaleMax, double[] Ticks, string Distance = "");
 
     private IntPtr _hBitmap;
     private Size _size;
@@ -26,15 +26,15 @@ internal sealed class HudWindow : LayeredWindow
     /// <param name="baseMax">기본 최고 속도 (100% 기준 px/s)</param>
     /// <param name="multipliers">부스트 배율 목록 (눈금·막대 끝 계산)</param>
     public void Tick(string label, int stage, double speedLogical, double baseMax, double[] multipliers,
-                     double carX, double carY, double carBelow, Rectangle area, int dpi)
+                     double carX, double carY, double carBelow, Rectangle area, int dpi, string distance = "")
     {
         double top = multipliers.Length > 0 ? multipliers.Max() : 1;
         double scaleMax = Math.Max(1, baseMax * Math.Max(1, top));
         var ticks = new[] { baseMax }.Concat(multipliers.Select(m => baseMax * m)).Where(t => t < scaleMax - 0.5).ToArray();
-        var state = new State(label, stage, Math.Max(0, speedLogical), scaleMax, ticks);
+        var state = new State(label, stage, Math.Max(0, speedLogical), scaleMax, ticks, distance);
 
         // 막대 픽셀 단위로 바뀔 때만 다시 그림
-        string key = $"{label}|{stage}|{(int)Math.Round(speedLogical)}|{(int)scaleMax}|{dpi}";
+        string key = $"{label}|{stage}|{(int)Math.Round(speedLogical)}|{(int)scaleMax}|{dpi}|{distance}";
         if (key != _key)
         {
             using var bmp = Render(state, dpi);
@@ -72,7 +72,7 @@ internal sealed class HudWindow : LayeredWindow
     };
 
     /// <summary>계기판 크기 (화면 배율 100% 기준 px)</summary>
-    internal const int HudWidth = 64, HudHeight = 25;
+    internal const int HudWidth = 64, HudHeight = 37;
 
     internal static Bitmap Render(State st, int dpi)
     {
@@ -140,6 +140,18 @@ internal sealed class HudWindow : LayeredWindow
             float tx = bar.X + bar.Width * (float)(st.Ticks[i] / st.ScaleMax);
             if (i == 0) g.DrawLine(baseTick, tx, bar.Y - 1.5f * s, tx, bar.Bottom + 1.5f * s);
             else g.DrawLine(tick, tx, bar.Y, tx, bar.Bottom);
+        }
+        // 3줄: 주행거리 (이번 실행에서 달린 거리)
+        if (!string.IsNullOrEmpty(st.Distance))
+        {
+            using var sep = new Pen(Color.FromArgb(45, 255, 255, 255), 1);
+            g.DrawLine(sep, pad, 24.5f * s, w - pad, 24.5f * s);
+            using var small = new Font("Malgun Gothic", 7.5f * s, FontStyle.Regular, GraphicsUnit.Pixel);
+            using var distFont = new Font("Segoe UI", 8.5f * s, FontStyle.Bold, GraphicsUnit.Pixel);
+            using var gray = new SolidBrush(Color.FromArgb(170, 255, 255, 255));
+            g.DrawString("주행", small, gray, pad, 27.2f * s, fmt);
+            var ds = g.MeasureString(st.Distance, distFont, PointF.Empty, fmt);
+            g.DrawString(st.Distance, distFont, Brushes.White, w - pad - ds.Width, 26.2f * s, fmt);
         }
         return bmp;
     }

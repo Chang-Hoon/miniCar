@@ -16,7 +16,7 @@
     <AssemblyName>miniCar</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>miniCar.ico</ApplicationIcon>
-    <Version>1.6.1</Version>
+    <Version>1.7.0</Version>
   </PropertyGroup>
 
   <ItemGroup>
