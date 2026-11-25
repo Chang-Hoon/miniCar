@@ -1,5 +1,9 @@
 # miniCar
 
+![miniCar 인포그래픽: 화면 구성, 주행 모드와 상태 전환, 단축키, 기능, 차·불빛·계기판](docs/miniCar_infographic.png)
+
+> 인포그래픽 원본(편집 가능): [`docs/miniCar_infographic.excalidraw`](docs/miniCar_infographic.excalidraw) — [excalidraw.com](https://excalidraw.com)이나 VS Code Excalidraw 확장에서 열 수 있습니다.
+
 Windows 화면 위를 돌아다니는 조그만 스포츠카입니다. 위에서 내려다본 모습입니다.
 디자인은 오리지널 **GT**(긴 보닛, 뒤로 물린 캐빈, 검은 루프, 슬림 LED)와 **클래식**(레이싱 스트라이프) 중에서 고르고, 색상은 8가지 프리셋 중에서 고를 수 있습니다.
 항상 다른 창 위에 떠 있지만 작업 중인 앱의 포커스는 가져가지 않습니다. 투명한 주변 영역의 클릭은 아래 창으로 그대로 통과합니다.
@@ -486,6 +490,7 @@ Windows 화면 위를 돌아다니는 조그만 스포츠카입니다. 위에서
 | `app.manifest` | DPI 인식(PerMonitorV2), 공용 컨트롤 v6 |
 | `miniCar.ico` | exe 아이콘 |
 | `build.sh` | Linux 빌드 스크립트 |
+| `docs/` | 인포그래픽 이미지(`miniCar_infographic.png`)와 Excalidraw 원본 |
 
 ### 동작 원리 요약
 
