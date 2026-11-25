@@ -78,7 +78,7 @@ internal sealed class AppSettings
 
     // ── 동작 ──
     [Setting] public bool UseWorkArea { get; set; } = true;
-    [Setting] public bool HideOnFullscreen { get; set; } = true;
+    [Setting] public string HideOnFullscreen { get; set; } = "Games";
     [Setting] public bool ShowKeyGuide { get; set; } = false;
     [Setting] public bool ShowSpeedHud { get; set; } = true;
     [Setting] public bool Headlights { get; set; } = false;
@@ -214,6 +214,8 @@ internal sealed class AppSettings
     private static readonly (string key, string[] oldDefaults, string newValue)[] LegacyDefaults =
     {
         ("ManualBoostMultipliers", new[] { "1.4,1.8,2.3" }, "1.4,1.8,2.3,2.8,3.4,4,4.7,5.4,6.2,7"),
+        ("HideOnFullscreen", new[] { "true", "True", "TRUE" }, "Games"),
+        ("HideOnFullscreen", new[] { "false", "False", "FALSE" }, "Never"),
     };
 
     /// <summary>
@@ -448,6 +450,12 @@ internal sealed class AppSettings
         SpeedIndex = MathX.Clamp(SpeedIndex, 0, SpeedLevels.Length - 1);
         CarLength = MathX.Clamp(CarLength, 16, 300);
         TrackWidth = MathX.Clamp(TrackWidth, 2, 40);
+        HideOnFullscreen = (HideOnFullscreen ?? "").Trim().ToLowerInvariant() switch
+        {
+            "all" => "All",
+            "never" or "false" or "off" => "Never",
+            _ => "Games", // "true"(예전 값)·빈 값·잘못된 값
+        };
         TrackName ??= "";
         BounceJitterDegrees = MathX.Clamp(BounceJitterDegrees, 0, 30);
         DriftTurnDegreesPerSecond = MathX.Clamp(DriftTurnDegreesPerSecond, 60, 720);

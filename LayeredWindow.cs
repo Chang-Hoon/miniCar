@@ -19,6 +19,9 @@ internal class LayeredWindow : Form
         StartPosition = FormStartPosition.Manual;
         AutoScaleMode = AutoScaleMode.None;
         TopMost = true;
+        MinimizeBox = false;  // "모든 창 최소화"(Win+D, Win+M)에 함께 내려가지 않도록
+        MaximizeBox = false;
+        ControlBox = false;
         Size = new Size(1, 1);
     }
 
@@ -31,6 +34,7 @@ internal class LayeredWindow : Form
             var cp = base.CreateParams;
             cp.ExStyle |= WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
             if (_clickThrough) cp.ExStyle |= WS_EX_TRANSPARENT;
+            cp.Style &= ~(WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU);
             return cp;
         }
     }
@@ -41,6 +45,9 @@ internal class LayeredWindow : Form
         {
             case WM_MOUSEACTIVATE:
                 m.Result = (IntPtr)MA_NOACTIVATE;
+                return;
+            case WM_SYSCOMMAND when ((int)m.WParam & 0xFFF0) is SC_MINIMIZE or SC_MAXIMIZE:
+                m.Result = IntPtr.Zero; // 최소화·최대화 명령 무시
                 return;
             case WM_DPICHANGED:
                 // WinForms의 자동 크기 조정/이동을 막는다. 크기와 위치는 매 프레임 직접 지정함.
@@ -80,6 +87,18 @@ internal class LayeredWindow : Form
     }
 
     /// <summary>다른 TOPMOST 창에 밀렸을 때 다시 맨 위로</summary>
+    /// <summary>
+    /// 보여야 하는 창이 바깥 요인(바탕 화면 보기, 모든 창 최소화 등)으로 최소화되거나 숨겨졌으면 다시 보이게 함.
+    /// 되살렸으면 true.
+    /// </summary>
+    public bool EnsureShown()
+    {
+        if (!IsHandleCreated || IsDisposed || !Visible) return false; // 일부러 숨긴 창은 그대로
+        if (!IsIconic(Handle) && IsWindowVisible(Handle)) return false;
+        ShowWindow(Handle, SW_SHOWNOACTIVATE);
+        return true;
+    }
+
     public void ReassertTopmost()
     {
         if (IsHandleCreated && Visible)

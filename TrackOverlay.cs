@@ -197,6 +197,15 @@ internal sealed class TrackOverlay : IDisposable
         foreach (var w in _windows) w.ReassertTopmost();
     }
 
+    /// <summary>바깥 요인으로 내려간 트랙 창을 다시 보이게 함</summary>
+    public bool EnsureShown()
+    {
+        if (!_shown) return false;
+        bool any = false;
+        foreach (var w in _windows) any |= w.EnsureShown();
+        return any;
+    }
+
     public void SetEditing(bool on)
     {
         if (Editing == on) return;

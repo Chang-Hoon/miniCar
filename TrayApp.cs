@@ -689,12 +689,21 @@ internal sealed class TrayApp : ApplicationContext
         _trackMenu.DropDownItems.Add("(열 때 채움)");
         _trackMenu.DropDownOpening += (_, _) => BuildTrackMenu();
 
+        var fullscreenMenu = new ToolStripMenuItem("전체 화면일 때 숨기기");
+        foreach (var (mode, label) in new[] { ("Games", "게임·슬라이드쇼·잠금 화면에서만 (기본)"), ("All", "일반 앱 전체 화면(브라우저 F11, 동영상)에서도"), ("Never", "숨기지 않음") })
+            fullscreenMenu.DropDownItems.Add(new ToolStripMenuItem(label, null, (_, _) => SetHideOnFullscreen(mode)) { Tag = mode });
+        fullscreenMenu.DropDownOpening += (_, _) =>
+        {
+            foreach (ToolStripMenuItem it in fullscreenMenu.DropDownItems) it.Checked = (string)it.Tag == _settings.HideOnFullscreen;
+        };
+
         menu.Items.AddRange(new ToolStripItem[]
         {
             _hideItem, new ToolStripSeparator(),
             _pauseItem, _manualItem, styleMenu, lookMenu, _headlightItem, _keyGuideItem, _speedHudItem, new ToolStripSeparator(),
             _fasterItem, _slowerItem, new ToolStripSeparator(),
             _trackEditItem, _trackMenu, new ToolStripSeparator(),
+            fullscreenMenu,
             new ToolStripMenuItem("설정 파일 열기", null, (_, _) => OpenSettingsFile()),
             new ToolStripMenuItem("설정 다시 불러오기", null, (_, _) => ReloadSettings()),
             new ToolStripMenuItem("모니터 정보 복사 (문제 진단용)", null, (_, _) => CopyMonitorInfo()),
@@ -800,7 +809,9 @@ internal sealed class TrayApp : ApplicationContext
     private void CopyMonitorInfo()
     {
         _layout.Refresh();
-        var text = _layout.Describe();
+        FullscreenCheck.ShouldHide(_settings.HideOnFullscreen, out string fs);
+        var text = _layout.Describe() + Environment.NewLine + "전체 화면 판정: " + fs
+            + Environment.NewLine + $"숨김 상태: 사용자 숨김={_userHidden}, 전체 화면 숨김={_hiddenForFullscreen}, 차 창 최소화={Native.IsIconic(_carWindow.Handle)}, 보임={Native.IsWindowVisible(_carWindow.Handle)}";
         try
         {
             Clipboard.SetText(text);
@@ -849,10 +860,26 @@ internal sealed class TrayApp : ApplicationContext
         _hud.ReassertTopmost();
 
         bool fullscreen = _editing ? _hiddenForFullscreen : false; // 그리는 중에는 판정하지 않음 (화면을 덮는 편집 창 때문)
-        if (_settings.HideOnFullscreen && !_editing && Native.SHQueryUserNotificationState(out int state) == 0)
+        if (!_editing)
+            fullscreen = FullscreenCheck.ShouldHide(_settings.HideOnFullscreen, out _); // 바탕 화면이 앞에 있을 때는 전체 화면으로 보지 않음
+
+        // 바탕 화면 보기·모든 창 최소화 등으로 우리 창이 내려갔으면 다시 올림
+        if (!fullscreen && !_hiddenForFullscreen)
         {
-            // 1: 화면보호기/잠금, 2: 전체 화면 앱, 3: D3D 전체 화면, 4: 프레젠테이션 모드
-            fullscreen = state is 1 or 2 or 3 or 4;
+            bool restored = _trackOverlay.EnsureShown();
+            restored |= _beam.EnsureShown();
+            restored |= _carWindow.EnsureShown();
+            restored |= _osd.EnsureShown();
+            restored |= _hud.EnsureShown();
+            if (restored)
+            {
+                _trackOverlay.ReassertTopmost();
+                _beam.ReassertTopmost();
+                _carWindow.ReassertTopmost();
+                _osd.ReassertTopmost();
+                _hud.ReassertTopmost();
+                WakeLoop();
+            }
         }
 
         if (fullscreen != _hiddenForFullscreen)
@@ -1134,6 +1161,19 @@ internal sealed class TrayApp : ApplicationContext
         _settings.Save();
         Flash("트랙을 비웠습니다");
         UpdateMenu();
+    }
+
+    private void SetHideOnFullscreen(string mode)
+    {
+        _settings.HideOnFullscreen = mode;
+        _settings.Save();
+        Housekeeping(); // 바로 적용
+        Flash(mode switch
+        {
+            "All" => "전체 화면 앱이면 숨김 (일반 앱 포함)",
+            "Never" => "전체 화면이어도 숨기지 않음",
+            _ => "게임·슬라이드쇼·잠금 화면에서만 숨김",
+        });
     }
 
     private void SetFollowTrack(bool on)
