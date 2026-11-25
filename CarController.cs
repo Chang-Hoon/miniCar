@@ -113,8 +113,16 @@ internal sealed class CarController
     private int _driftDir;
     private double _driftTotal, _driftTurned, _driftOmega, _driftTarget;
 
-    /// <summary>테스트용 통계: 시작한 드리프트 수 / 벽에 직접 닿아 즉시 반사한 수</summary>
-    internal int DriftCount, WallHitCount;
+    /// <summary>테스트용 통계: 시작한 드리프트 수 / 벽에 직접 닿아 즉시 반사한 수 / 트랙 선에 부딪힌 수</summary>
+    internal int DriftCount, WallHitCount, TrackHitCount;
+
+    /// <summary>사용자가 그린 트랙. 선은 화면 가장자리처럼 벽으로 작용한다 (null 또는 빈 트랙 = 없음)</summary>
+    public Track? Track { get; set; }
+
+    // 차와 겹친 채로 생긴 선(차 위에 그었거나 차를 선 위에 놓은 경우)은 차가 완전히 벗어날 때까지 통과
+    private readonly HashSet<TrackStroke> _knownStrokes = new();
+    private readonly HashSet<TrackStroke> _ghostStrokes = new();
+    private bool _recheckOverlap = true;
 
     /// <summary>수동 주행: 부스트 중 방향을 바꾸면 드리프트</summary>
     public bool BoostDrift { get; set; } = true;
@@ -163,6 +171,7 @@ internal sealed class CarController
         DisplayAngle = Heading;
         _vx = _vy = 0;
         CancelDrift();
+        _recheckOverlap = true;
     }
 
     private void CancelDrift()
@@ -354,6 +363,7 @@ internal sealed class CarController
         Y = y;
         _vx = _vy = 0;
         Braking = Reversing = false;
+        _recheckOverlap = true; // 선 위에 내려놓아도 빠져나올 수 있게
         return true;
     }
 
@@ -403,6 +413,8 @@ internal sealed class CarController
                 : Approach(DisplayAngle, Heading, TopDownTurnRate * dt);
         }
 
+        if (Track != null && !Track.IsEmpty) ResolveTrack(bx, by, dt);
+
         // 속력: 수동은 속도 벡터 크기, 자율은 실제로 움직인 거리 (벽 반사 순간의 0을 피하려고 이전 값과 섞음)
         if (Mode == DriveMode.Manual) Speed = CurrentSpeed;
         else if (dt > 0)
@@ -413,6 +425,99 @@ internal sealed class CarController
 
         // 모니터가 분리되는 등으로 화면 밖에 남으면 주 모니터로 복귀
         if (!_layout.Contains(X, Y)) PlaceAtPrimaryCenter();
+    }
+
+    /// <summary>
+    /// 트랙 선과의 충돌. 이번 프레임 이동으로 선에 더 깊이 파고들면 이동을 취소하고
+    /// 자율 주행은 선에서 반사, 수동 주행은 선을 따라 미끄러지게 한다.
+    /// 이미 겹쳐 있던 경우(차 위에 선을 그은 경우 등)는 빠져나오는 이동은 허용한다.
+    /// </summary>
+    private void ResolveTrack(double bx, double by, double dt)
+    {
+        UpdateGhostStrokes(bx, by);
+        double pen = Track!.Penetration(X, Y, DisplayAngle, HalfLength, HalfWidth, out double nx, out double ny, _ghostStrokes);
+        if (pen <= 0.05) return;
+        double before = Track.Penetration(bx, by, DisplayAngle, HalfLength, HalfWidth, out _, out _, _ghostStrokes);
+        if (pen <= before + 0.05) return;
+
+        TrackHitCount++;
+        X = bx;
+        Y = by;
+
+        if (Mode == DriveMode.Auto)
+        {
+            CancelDrift();
+            double h = Heading * Math.PI / 180, dx = Math.Cos(h), dy = Math.Sin(h);
+            double dot = dx * nx + dy * ny;
+            if (dot < 0)
+            {
+                double rx = dx - 2 * dot * nx, ry = dy - 2 * dot * ny;
+                double reflected = Math.Atan2(ry, rx) * 180 / Math.PI;
+                double jittered = reflected + (_rng.NextDouble() * 2 - 1) * BounceJitterDegrees;
+                double jr = jittered * Math.PI / 180;
+                // 흔든 방향이 다시 선 쪽이거나 선과 거의 평행하면 순수 반사각
+                Heading = Normalize(Math.Cos(jr) * nx + Math.Sin(jr) * ny > 0.15 ? jittered : reflected);
+            }
+            return;
+        }
+
+        // 수동: 선을 향한 속도 성분을 없애고 선을 따라 미끄러짐
+        double vn = _vx * nx + _vy * ny;
+        double mx = _vx, my = _vy; // 이번 프레임에 시도할 미끄러짐 이동 속도
+        if (vn < 0)
+        {
+            mx = _vx - vn * nx;
+            my = _vy - vn * ny;
+            if (Style == ControlStyle.Car)
+            {
+                // 자동차식: 속도는 차체 방향이어야 하므로, 선과 이루는 각만큼 속도를 줄이고
+                // 차체를 선 방향으로 조금씩 돌려 벽을 긁으며 따라가게 함
+                double hr = Heading * Math.PI / 180, fx = Math.Cos(hr), fy = Math.Sin(hr);
+                double s = _vx * fx + _vy * fy;
+                double tx0 = -ny, ty0 = nx;
+                double along = fx * tx0 + fy * ty0;
+                if (along < 0) { tx0 = -tx0; ty0 = -ty0; along = -along; }
+                if (s < 0) { tx0 = -tx0; ty0 = -ty0; } // 후진 중이면 뒤쪽 방향
+                s *= along;
+                double tangentDeg = Math.Atan2(s < 0 ? -ty0 : ty0, s < 0 ? -tx0 : tx0) * 180 / Math.PI;
+                if (along > 0.05) Heading = Approach(Heading, tangentDeg, 150 * dt);
+                hr = Heading * Math.PI / 180;
+                _vx = s * Math.Cos(hr);
+                _vy = s * Math.Sin(hr);
+                _wallContact = true; // 다음 프레임에 핸들로 빠져나올 수 있게
+            }
+            else
+            {
+                _vx -= 1.25 * vn * nx; // 탑뷰: 살짝 튕김
+                _vy -= 1.25 * vn * ny;
+            }
+        }
+
+        // 선을 따라 미끄러지기 (더 파고들지 않을 때만)
+        double tx = X + mx * dt, ty = Y + my * dt;
+        if (Track.Penetration(tx, ty, DisplayAngle, HalfLength, HalfWidth, out _, out _, _ghostStrokes) <= before + 0.05 && _layout.Contains(tx, ty))
+        {
+            X = tx;
+            Y = ty;
+        }
+    }
+
+    /// <summary>새로 생긴 선이나 차를 옮긴 직후 차와 겹쳐 있는 선은 통과 대상으로, 벗어나면 다시 벽으로</summary>
+    private void UpdateGhostStrokes(double bx, double by)
+    {
+        var strokes = Track!.Strokes;
+        if (_knownStrokes.Count > strokes.Count * 2 + 16) _knownStrokes.IntersectWith(strokes);
+        foreach (var s in strokes)
+        {
+            bool isNew = _knownStrokes.Add(s);
+            if ((isNew || _recheckOverlap) && Track.StrokePenetration(s, bx, by, DisplayAngle, HalfLength, HalfWidth, out _, out _) > 0.5)
+                _ghostStrokes.Add(s);
+        }
+        _recheckOverlap = false;
+        if (_ghostStrokes.Count == 0) return;
+        _ghostStrokes.RemoveWhere(s => !strokes.Contains(s) ||
+            (Track.StrokePenetration(s, X, Y, DisplayAngle, HalfLength, HalfWidth, out _, out _) <= 0 &&
+             Track.StrokePenetration(s, bx, by, DisplayAngle, HalfLength, HalfWidth, out _, out _) <= 0));
     }
 
     /// <summary>멈춤·드래그 중에는 속도 0으로 표시</summary>

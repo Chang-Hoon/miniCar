@@ -51,6 +51,18 @@ internal sealed class TrayApp : ApplicationContext
     private bool _idle;
     private bool _hiddenForFullscreen;
 
+    // 숨기기 (단축키로 차와 트랙을 감추고 트레이에서 그 키만 기다림)
+    private bool _userHidden;
+    private bool _restoreManual;
+    private ToolStripMenuItem _hideItem = null!;
+
+    // 트랙
+    private readonly Track _track = new();
+    private readonly TrackStore _trackStore = TrackStore.Default();
+    private readonly TrackOverlay _trackOverlay;
+    private bool _editing;
+    private ToolStripMenuItem _trackMenu = null!, _trackEditItem = null!;
+
     // 마우스 드래그
     private double _grabDx, _grabDy;
     private readonly List<(double t, Point p)> _dragSamples = new();
@@ -71,15 +83,18 @@ internal sealed class TrayApp : ApplicationContext
         _layout.Refresh();
 
         _sprite = new CarSprite(_settings.GetCarColor(), _settings.CarLength, _settings.GetCarDesign());
-        _car = new CarController(_layout);
+        _car = new CarController(_layout) { Track = _track };
+        _trackOverlay = new TrackOverlay(_track, _layout) { Notify = Flash };
         ApplyDrivingSettings();
         _car.PlaceAtPrimaryCenter();
+        string? trackError = LoadStartupTrack();
 
         _carWindow.DragStarted += OnDragStarted;
         _carWindow.DragEnded += OnDragEnded;
         _carWindow.Clicked += ToggleKeyGuide;
         _carWindow.RightClicked += ShowTrayMenu;
 
+        _trackOverlay.SyncMonitors(); // 트랙은 맨 아래
         _beam.Show();       // 불빛은 차보다 아래에 놓이도록 먼저
         _carWindow.Show();
         _osd.Show();
@@ -102,6 +117,7 @@ internal sealed class TrayApp : ApplicationContext
 
         var problems = new List<string>();
         if (loadError != null) problems.Add(loadError);
+        if (trackError != null) problems.Add(trackError);
         if (failures.Count > 0) problems.Add("등록 실패한 단축키 (다른 프로그램이 사용 중): " + string.Join(", ", failures));
         if (problems.Count > 0)
             _tray.ShowBalloonTip(5000, "miniCar", string.Join("\n", problems), ToolTipIcon.Warning);
@@ -135,7 +151,7 @@ internal sealed class TrayApp : ApplicationContext
             double dt = MathX.Clamp(now - _lastTime, 0, 0.05);
             _lastTime = now;
 
-            if (_quitting || _hiddenForFullscreen) return;
+            if (_quitting || _hiddenForFullscreen || _userHidden) return;
 
             var monitor = _layout.MonitorAt(_car.X, _car.Y);
             int dpi = monitor.Dpi;
@@ -150,7 +166,7 @@ internal sealed class TrayApp : ApplicationContext
                 monitor = _layout.MonitorAt(_car.X, _car.Y);
                 dpi = monitor.Dpi;
             }
-            else if (!_paused)
+            else if (!_paused && !_editing) // 트랙을 그리는 동안은 차가 멈춤
             {
                 (_car.HalfLength, _car.HalfWidth) = _sprite.HalfExtents(dpi);
                 var input = _capture.ReadInput();
@@ -185,7 +201,7 @@ internal sealed class TrayApp : ApplicationContext
         finally
         {
             // 멈춤 상태에서 OSD 애니메이션·타이어 자국도 끝났으면 루프를 재워서 CPU를 쓰지 않음
-            if (_hiddenForFullscreen || (_paused && !_osd.IsAnimating && !_carWindow.Dragging && !_skids.Active)) _runGate.Reset();
+            if (_hiddenForFullscreen || _userHidden || (_paused && !_osd.IsAnimating && !_carWindow.Dragging && !_skids.Active)) _runGate.Reset();
             Volatile.Write(ref _framePending, 0);
         }
     }
@@ -386,8 +402,15 @@ internal sealed class TrayApp : ApplicationContext
         UpdateMenu();
     }
 
-    private void ToggleMode() =>
+    private void ToggleMode()
+    {
+        if (_editing)
+        {
+            Flash("트랙을 그리는 중에는 주행 모드를 바꿀 수 없습니다 (Esc: 그리기 끝)");
+            return;
+        }
         SetMode(_car.Mode == DriveMode.Auto ? DriveMode.Manual : DriveMode.Auto);
+    }
 
     private void SetMode(DriveMode mode, bool announce = true)
     {
@@ -446,6 +469,12 @@ internal sealed class TrayApp : ApplicationContext
         _skids.FadeSeconds = _settings.SkidMarkFadeSeconds;
         _mover.ScrollNotchesPerSecond = _settings.ScrollNotchesPerSecond;
         _mover.UseRealInput = _settings.ScrollMethod != "Message";
+        _trackOverlay.WidthLogical = (float)_settings.TrackWidth;
+        if (_trackOverlay.Color.ToArgb() != _settings.GetTrackColor().ToArgb())
+        {
+            _trackOverlay.Color = _settings.GetTrackColor();
+            _trackOverlay.Render();
+        }
     }
 
     private void SetControlStyle(ControlStyle style)
@@ -570,6 +599,11 @@ internal sealed class TrayApp : ApplicationContext
 
     private void RefreshStickyLabel()
     {
+        if (_editing)
+        {
+            _osd.StickyText = "트랙 그리기 · 왼쪽 끌기: 선 그리기 · 오른쪽 클릭: 선 지우기 · Ctrl+Z: 되돌리기 · Esc: 끝내기";
+            return;
+        }
         if (_car.Mode != DriveMode.Manual || !_settings.ShowKeyGuide) { _osd.StickyText = null; return; }
         string exit = _manualExitKey?.ToString() ?? "모드 전환 키";
         string park = _parkKey?.ToString() ?? "-";
@@ -607,6 +641,8 @@ internal sealed class TrayApp : ApplicationContext
         Bind("느리게", _settings.SpeedDown, () => ChangeSpeed(-1), true);
         Bind("종료", _settings.Quit, Quit, false);
         Bind("헤드라이트", _settings.HeadlightToggle, ToggleHeadlights, false);
+        Bind("숨기기", _settings.HideToggle, ToggleHidden, false);
+        Bind("트랙 그리기", _settings.TrackEditToggle, () => SetTrackEdit(!_editing), false);
 
         _manualExitKey = Hotkey.TryParse(_settings.ManualExitKey, out var exitKey) ? exitKey : null;
         _parkKey = Hotkey.TryParse(_settings.ParkKey, out var parkKey) ? parkKey : null;
@@ -646,10 +682,18 @@ internal sealed class TrayApp : ApplicationContext
         var lookMenu = new ToolStripMenuItem("차 디자인");
         lookMenu.DropDownItems.AddRange(new ToolStripItem[] { _designGtItem, _designClassicItem, new ToolStripSeparator(), colorMenu });
 
+        _hideItem = new ToolStripMenuItem("숨기기", null, (_, _) => ToggleHidden());
+        _trackEditItem = new ToolStripMenuItem("트랙 그리기", null, (_, _) => SetTrackEdit(!_editing));
+        _trackMenu = new ToolStripMenuItem("트랙");
+        _trackMenu.DropDownItems.Add("(열 때 채움)");
+        _trackMenu.DropDownOpening += (_, _) => BuildTrackMenu();
+
         menu.Items.AddRange(new ToolStripItem[]
         {
+            _hideItem, new ToolStripSeparator(),
             _pauseItem, _manualItem, styleMenu, lookMenu, _headlightItem, _keyGuideItem, _speedHudItem, new ToolStripSeparator(),
             _fasterItem, _slowerItem, new ToolStripSeparator(),
+            _trackEditItem, _trackMenu, new ToolStripSeparator(),
             new ToolStripMenuItem("설정 파일 열기", null, (_, _) => OpenSettingsFile()),
             new ToolStripMenuItem("설정 다시 불러오기", null, (_, _) => ReloadSettings()),
             new ToolStripMenuItem("모니터 정보 복사 (문제 진단용)", null, (_, _) => CopyMonitorInfo()),
@@ -660,7 +704,7 @@ internal sealed class TrayApp : ApplicationContext
         UpdateTrayIcon();
         _tray.Text = "miniCar";
         _tray.ContextMenuStrip = menu;
-        _tray.DoubleClick += (_, _) => TogglePause();
+        _tray.DoubleClick += (_, _) => { if (_userHidden) ToggleHidden(); else TogglePause(); };
         _tray.Visible = true;
         UpdateMenu();
     }
@@ -713,9 +757,22 @@ internal sealed class TrayApp : ApplicationContext
             item.Checked = string.Equals(hex, _settings.CarColor?.Trim(), StringComparison.OrdinalIgnoreCase);
         _fasterItem.Enabled = _settings.SpeedIndex < _settings.SpeedLevels.Length - 1;
         _slowerItem.Enabled = _settings.SpeedIndex > 0;
+        _hideItem.Text = _userHidden ? "다시 보이기" : "숨기기";
+        _trackEditItem.Checked = _editing;
+        // 숨긴 동안에는 보이기·종료만
+        if (_tray.ContextMenuStrip != null)
+            foreach (ToolStripItem item in _tray.ContextMenuStrip.Items)
+                if (item is ToolStripMenuItem) item.Enabled = !_userHidden || item == _hideItem || item == _quitItem;
+        if (!_userHidden)
+        {
+            _fasterItem.Enabled = _settings.SpeedIndex < _settings.SpeedLevels.Length - 1;
+            _slowerItem.Enabled = _settings.SpeedIndex > 0;
+        }
         string mode = _car.Mode == DriveMode.Manual ? "수동" : "자율";
-        string state = _paused ? " · 일시정지" : "";
-        _tray.Text = $"miniCar · {mode} · 속도 {_settings.SpeedIndex + 1}/{_settings.SpeedLevels.Length}{state}";
+        string state = _userHidden ? " · 숨김" : _editing ? " · 트랙 그리는 중" : _paused ? " · 일시정지" : "";
+        string track = _track.IsEmpty ? "" : $" · 트랙 {_track.Name ?? "(저장 안 함)"}{(_track.Modified ? "*" : "")}";
+        string text = $"miniCar · {mode} · 속도 {_settings.SpeedIndex + 1}/{_settings.SpeedLevels.Length}{state}{track}";
+        _tray.Text = text.Length > 63 ? text.Substring(0, 63) : text; // 트레이 풍선 글자 수 제한
     }
 
     private void UpdateMenuShortcuts()
@@ -728,6 +785,8 @@ internal sealed class TrayApp : ApplicationContext
         _slowerItem.ShortcutKeyDisplayString = Show(_settings.SpeedDown);
         _quitItem.ShortcutKeyDisplayString = Show(_settings.Quit);
         if (_headlightItem != null) _headlightItem.ShortcutKeyDisplayString = Show(_settings.HeadlightToggle);
+        if (_hideItem != null) _hideItem.ShortcutKeyDisplayString = Show(_settings.HideToggle);
+        if (_trackEditItem != null) _trackEditItem.ShortcutKeyDisplayString = Show(_settings.TrackEditToggle);
     }
 
     private void OpenSettingsFile()
@@ -779,14 +838,17 @@ internal sealed class TrayApp : ApplicationContext
 
     private void Housekeeping()
     {
+        if (_userHidden) return; // 숨긴 동안에는 아무것도 하지 않음
         _layout.Refresh();
+        _trackOverlay.SyncMonitors();
+        _trackOverlay.ReassertTopmost(); // 트랙 → 불빛 → 차 → 안내 순서로 위에 올라가도록
         _beam.ReassertTopmost();   // 불빛 → 차 → 안내 순서로 위에 올라가도록
         _carWindow.ReassertTopmost();
         _osd.ReassertTopmost();
         _hud.ReassertTopmost();
 
-        bool fullscreen = false;
-        if (_settings.HideOnFullscreen && Native.SHQueryUserNotificationState(out int state) == 0)
+        bool fullscreen = _editing ? _hiddenForFullscreen : false; // 그리는 중에는 판정하지 않음 (화면을 덮는 편집 창 때문)
+        if (_settings.HideOnFullscreen && !_editing && Native.SHQueryUserNotificationState(out int state) == 0)
         {
             // 1: 화면보호기/잠금, 2: 전체 화면 앱, 3: D3D 전체 화면, 4: 프레젠테이션 모드
             fullscreen = state is 1 or 2 or 3 or 4;
@@ -797,20 +859,13 @@ internal sealed class TrayApp : ApplicationContext
             _hiddenForFullscreen = fullscreen;
             if (fullscreen)
             {
+                SetTrackEdit(false);
                 SetMode(DriveMode.Auto, announce: false); // 숨겨진 채로 키를 뺏지 않도록
-                _skids.Clear();
-                _carWindow.Hide();
-                _osd.Hide();
-                _hud.Hide();
-                _beam.Hide();
+                HideWindows();
             }
             else
             {
-                _carWindow.Show();
-                _beam.Show();
-                _carWindow.ReassertTopmost();
-                _osd.Show();
-                _hud.Show();
+                ShowWindows();
                 WakeLoop();
             }
         }
@@ -819,7 +874,274 @@ internal sealed class TrayApp : ApplicationContext
     private void OnDisplayChanged(object? sender, EventArgs e)
     {
         if (_carWindow.IsHandleCreated)
-            _carWindow.BeginInvoke(() => { _layout.Refresh(); WakeLoop(); });
+            _carWindow.BeginInvoke(() =>
+            {
+                _layout.Refresh();
+                if (!_userHidden) _trackOverlay.SyncMonitors();
+                WakeLoop();
+            });
+    }
+
+    private void HideWindows()
+    {
+        _skids.Clear();
+        _carWindow.Hide();
+        _osd.Hide();
+        _hud.Hide();
+        _beam.Hide();
+        _trackOverlay.HideAll();
+    }
+
+    private void ShowWindows()
+    {
+        _trackOverlay.ShowAll();
+        _beam.Show();
+        _carWindow.Show();
+        _osd.Show();
+        _hud.Show();
+        _trackOverlay.ReassertTopmost();
+        _beam.ReassertTopmost();
+        _carWindow.ReassertTopmost();
+        _osd.ReassertTopmost();
+        _hud.ReassertTopmost();
+    }
+
+    // ───────────────────── 숨기기 ─────────────────────
+
+    /// <summary>
+    /// 차와 트랙을 모두 감추고 숨기기 단축키만 남김 (다른 단축키·키보드 캡처·프레임 루프 정지).
+    /// 다시 누르면 숨기기 전 상태로 돌아옴.
+    /// </summary>
+    private void ToggleHidden()
+    {
+        if (!_userHidden)
+        {
+            SetTrackEdit(false);
+            _restoreManual = _car.Mode == DriveMode.Manual;
+            if (_restoreManual) SetMode(DriveMode.Auto, announce: false);
+            _userHidden = true;
+            HideWindows();
+            _runGate.Reset();
+
+            _hotkeys.UnregisterAll();
+            if (Hotkey.TryParse(_settings.HideToggle, out var hk)) _hotkeys.Register(hk, ToggleHidden, false);
+        }
+        else
+        {
+            _userHidden = false;
+            RegisterHotkeys();
+            if (!_hiddenForFullscreen) ShowWindows();
+            WakeLoop();
+            if (_restoreManual && !_hiddenForFullscreen) SetMode(DriveMode.Manual, announce: false);
+            _restoreManual = false;
+            Flash("miniCar 다시 출발");
+        }
+        UpdateMenu();
+    }
+
+    // ───────────────────── 트랙 ─────────────────────
+
+    private string? LoadStartupTrack()
+    {
+        string name = _settings.TrackName?.Trim() ?? "";
+        if (name.Length == 0) return null;
+        try
+        {
+            if (!_trackStore.Exists(name)) return $"마지막 트랙 '{name}' 파일이 없어 트랙 없이 시작합니다.";
+            _track.ReplaceWith(_trackStore.Load(name), name);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            return $"트랙 '{name}'을(를) 불러오지 못했습니다: {ex.Message}";
+        }
+    }
+
+    private void SetTrackEdit(bool on)
+    {
+        if (on == _editing) return;
+        if (on && (_userHidden || _hiddenForFullscreen)) return;
+        _editing = on;
+        if (on)
+        {
+            if (_car.Mode == DriveMode.Manual) _capture.Stop(); // Esc 등을 그리기용으로 쓰도록 잠시 풀어 줌
+            SetParked(false);
+            _car.Stop();
+            _trackOverlay.SetEditing(true);
+            ShowWindows(); // 트랙 창이 차보다 아래에 오도록 순서 정리
+            // 그리는 동안만 쓰는 키
+            if (Hotkey.TryParse("Escape", out var esc)) _hotkeys.Register(esc, () => SetTrackEdit(false), false);
+            if (Hotkey.TryParse("Ctrl+Z", out var undo)) _hotkeys.Register(undo, UndoTrackStroke, true);
+            RefreshStickyLabel();
+            Flash("트랙 그리기 · 왼쪽 버튼으로 끌어서 선을 그리세요");
+        }
+        else
+        {
+            _trackOverlay.SetEditing(false);
+            RegisterHotkeys(); // Esc·Ctrl+Z 해제
+            if (_car.Mode == DriveMode.Manual && !_capture.Start()) SetMode(DriveMode.Auto);
+            _lastActiveTime = _clock.Elapsed.TotalSeconds;
+            RefreshStickyLabel();
+            Flash(_track.Modified && !_track.IsEmpty
+                ? "트랙 그리기 끝 · 저장하려면 트레이 메뉴 → 트랙 → 저장"
+                : "트랙 그리기 끝");
+        }
+        WakeLoop();
+        UpdateMenu();
+    }
+
+    private void UndoTrackStroke()
+    {
+        if (_track.RemoveLast()) Flash("마지막 선을 지웠습니다");
+        UpdateMenu();
+    }
+
+    private void BuildTrackMenu()
+    {
+        var items = _trackMenu.DropDownItems;
+        items.Clear();
+        string current = _track.IsEmpty && _track.Name == null
+            ? "현재: 트랙 없음"
+            : $"현재: {_track.Name ?? "저장 안 한 트랙"}{(_track.Modified ? " (바뀜, 저장 안 됨)" : "")} · 선 {_track.Strokes.Count}개";
+        items.Add(new ToolStripMenuItem(current) { Enabled = false });
+        items.Add(new ToolStripSeparator());
+
+        var undo = new ToolStripMenuItem("마지막 선 지우기", null, (_, _) => UndoTrackStroke()) { Enabled = !_track.IsEmpty, ShortcutKeyDisplayString = _editing ? "Ctrl+Z" : "" };
+        items.Add(undo);
+        items.Add(new ToolStripMenuItem("트랙 비우기 (저장하지 않고 지움)", null, (_, _) => ClearTrack()) { Enabled = !_track.IsEmpty || _track.Name != null });
+        items.Add(new ToolStripSeparator());
+
+        items.Add(new ToolStripMenuItem(_track.Name == null ? "저장..." : $"저장 ('{_track.Name}'에 덮어쓰기)", null, (_, _) => SaveTrack(askName: false)) { Enabled = !_track.IsEmpty });
+        items.Add(new ToolStripMenuItem("다른 이름으로 저장...", null, (_, _) => SaveTrack(askName: true)) { Enabled = !_track.IsEmpty });
+
+        var names = _trackStore.Names();
+        var load = new ToolStripMenuItem("불러오기") { Enabled = names.Count > 0 };
+        var delete = new ToolStripMenuItem("삭제") { Enabled = names.Count > 0 };
+        foreach (var n in names)
+        {
+            string name = n;
+            bool isCurrent = string.Equals(name, _track.Name, StringComparison.OrdinalIgnoreCase);
+            load.DropDownItems.Add(new ToolStripMenuItem(name, null, (_, _) => LoadTrack(name)) { Checked = isCurrent });
+            delete.DropDownItems.Add(new ToolStripMenuItem(name, null, (_, _) => DeleteTrack(name)) { Checked = isCurrent });
+        }
+        items.Add(load);
+        items.Add(delete);
+        items.Add(new ToolStripSeparator());
+        items.Add(new ToolStripMenuItem("트랙 폴더 열기", null, (_, _) => OpenTrackFolder()));
+    }
+
+    /// <summary>저장 안 한 트랙이 있으면 저장할지 물음. 계속 진행해도 되면 true</summary>
+    private bool ConfirmUnsaved(string action)
+    {
+        if (!_track.Modified || _track.IsEmpty) return true;
+        var r = Dialogs.Ask($"저장하지 않은 트랙이 있습니다 ({_track.Name ?? "새 트랙"}, 선 {_track.Strokes.Count}개).\n{action} 전에 저장할까요?",
+            MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+        if (r == DialogResult.Cancel) return false;
+        if (r == DialogResult.Yes) return SaveTrack(askName: false);
+        return true;
+    }
+
+    private bool SaveTrack(bool askName)
+    {
+        if (_track.IsEmpty)
+        {
+            Flash("저장할 트랙이 없습니다 (트랙 그리기로 선을 그리세요)");
+            return false;
+        }
+        string? name = _track.Name;
+        if (askName || name == null)
+        {
+            name = Dialogs.AskTrackName(askName && name != null ? "다른 이름으로 저장" : "트랙 저장",
+                name ?? $"트랙 {DateTime.Now:yyyy-MM-dd HHmm}", _trackStore.Names());
+            if (name == null) return false;
+            bool sameAsCurrent = string.Equals(name, _track.Name, StringComparison.OrdinalIgnoreCase);
+            if (!sameAsCurrent && _trackStore.Exists(name) &&
+                Dialogs.Ask($"'{name}' 트랙이 이미 있습니다. 덮어쓸까요?", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+                return false;
+        }
+        try
+        {
+            _trackStore.Save(name, _track.Strokes);
+        }
+        catch (Exception ex)
+        {
+            _tray.ShowBalloonTip(4000, "miniCar", "트랙을 저장하지 못했습니다: " + ex.Message, ToolTipIcon.Error);
+            return false;
+        }
+        _track.Name = name;
+        _track.Modified = false;
+        _settings.TrackName = name;
+        _settings.Save();
+        Flash($"트랙 저장: {name}");
+        UpdateMenu();
+        return true;
+    }
+
+    private void LoadTrack(string name)
+    {
+        if (!ConfirmUnsaved("다른 트랙을 불러오기")) return;
+        try
+        {
+            _track.ReplaceWith(_trackStore.Load(name), name);
+        }
+        catch (Exception ex)
+        {
+            _tray.ShowBalloonTip(4000, "miniCar", $"트랙 '{name}'을(를) 불러오지 못했습니다: {ex.Message}", ToolTipIcon.Error);
+            return;
+        }
+        _settings.TrackName = name;
+        _settings.Save();
+        Flash($"트랙 불러옴: {name}");
+        WakeLoop();
+        UpdateMenu();
+    }
+
+    private void DeleteTrack(string name)
+    {
+        if (Dialogs.Ask($"'{name}' 트랙 파일을 삭제할까요?\n삭제한 파일은 되돌릴 수 없습니다.",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+            return;
+        try
+        {
+            _trackStore.Delete(name);
+        }
+        catch (Exception ex)
+        {
+            _tray.ShowBalloonTip(4000, "miniCar", $"트랙 '{name}'을(를) 삭제하지 못했습니다: {ex.Message}", ToolTipIcon.Error);
+            return;
+        }
+        if (string.Equals(name, _track.Name, StringComparison.OrdinalIgnoreCase))
+        {
+            // 화면의 트랙은 남겨 두되 저장 안 된 새 트랙으로
+            _track.Name = null;
+            _track.Modified = !_track.IsEmpty;
+            _settings.TrackName = "";
+            _settings.Save();
+        }
+        Flash($"트랙 삭제: {name}");
+        UpdateMenu();
+    }
+
+    private void ClearTrack()
+    {
+        if (_track.Modified && !_track.IsEmpty &&
+            Dialogs.Ask("저장하지 않은 트랙을 지울까요?", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+            return;
+        _track.Clear();
+        _settings.TrackName = "";
+        _settings.Save();
+        Flash("트랙을 비웠습니다");
+        UpdateMenu();
+    }
+
+    private void OpenTrackFolder()
+    {
+        try
+        {
+            Directory.CreateDirectory(_trackStore.Folder);
+            Process.Start(new ProcessStartInfo("explorer.exe", $"\"{_trackStore.Folder}\"") { UseShellExecute = true });
+        }
+        catch (Exception ex) { _tray.ShowBalloonTip(3000, "miniCar", ex.Message, ToolTipIcon.Error); }
     }
 
     // ───────────────────── 종료 ─────────────────────
@@ -827,6 +1149,7 @@ internal sealed class TrayApp : ApplicationContext
     private void Quit()
     {
         if (_quitting) return;
+        if (!ConfirmUnsaved("종료하기")) return;
         _quitting = true;
         _runGate.Set();
 
@@ -844,6 +1167,7 @@ internal sealed class TrayApp : ApplicationContext
         _osd.Close();
         _hud.Close();
         _beam.Close();
+        _trackOverlay.Dispose();
         _skids.Dispose();
         _sprite.Dispose();
         ExitThread();

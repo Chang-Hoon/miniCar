@@ -178,4 +178,16 @@ internal static class Native
     /// <summary>전체 화면 앱/프레젠테이션 여부 확인</summary>
     [DllImport("shell32.dll")]
     public static extern int SHQueryUserNotificationState(out int state);
+
+    // ── 트랙 화면용 DIB (GDI+로 직접 그리고 UpdateLayeredWindow에 그대로 넘김) ──
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BITMAPINFOHEADER
+    {
+        public int biSize, biWidth, biHeight;
+        public short biPlanes, biBitCount;
+        public int biCompression, biSizeImage, biXPelsPerMeter, biYPelsPerMeter, biClrUsed, biClrImportant;
+    }
+
+    [DllImport("gdi32.dll", SetLastError = true)]
+    public static extern IntPtr CreateDIBSection(IntPtr hdc, ref BITMAPINFOHEADER bmi, uint usage, out IntPtr bits, IntPtr hSection, uint offset);
 }

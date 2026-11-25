@@ -24,6 +24,8 @@ internal sealed class AppSettings
     [Setting] public string SpeedUp { get; set; } = "Ctrl+Alt+Shift+PageUp";
     [Setting] public string SpeedDown { get; set; } = "Ctrl+Alt+Shift+PageDown";
     [Setting] public string Quit { get; set; } = "Ctrl+Alt+Shift+Q";
+    [Setting] public string HideToggle { get; set; } = "Ctrl+Alt+Shift+V";
+    [Setting] public string TrackEditToggle { get; set; } = "Ctrl+Alt+Shift+T";
 
     // ── 수동 주행 중에만 쓰는 키 ──
     [Setting] public string ManualExitKey { get; set; } = "Escape";
@@ -67,6 +69,11 @@ internal sealed class AppSettings
     [Setting] public string CarDesign { get; set; } = "GT";
     [Setting] public string CarColor { get; set; } = "#E53935";
     [Setting] public int CarLength { get; set; } = 48;
+
+    // 트랙
+    [Setting] public double TrackWidth { get; set; } = 8;
+    [Setting] public string TrackColor { get; set; } = "#FFB300";
+    [Setting] public string TrackName { get; set; } = "";
 
     // ── 동작 ──
     [Setting] public bool UseWorkArea { get; set; } = true;
@@ -439,6 +446,8 @@ internal sealed class AppSettings
         SpeedLevels = SpeedLevels.Select(v => MathX.Clamp(v, 5, 5000)).ToArray();
         SpeedIndex = MathX.Clamp(SpeedIndex, 0, SpeedLevels.Length - 1);
         CarLength = MathX.Clamp(CarLength, 16, 300);
+        TrackWidth = MathX.Clamp(TrackWidth, 2, 40);
+        TrackName ??= "";
         BounceJitterDegrees = MathX.Clamp(BounceJitterDegrees, 0, 30);
         DriftTurnDegreesPerSecond = MathX.Clamp(DriftTurnDegreesPerSecond, 60, 720);
         DriftSlipDegrees = MathX.Clamp(DriftSlipDegrees, 0, 70);
@@ -471,6 +480,12 @@ internal sealed class AppSettings
     public miniCar.CarDesign GetCarDesign() => CarDesign == "Classic" ? miniCar.CarDesign.Classic : miniCar.CarDesign.GT;
 
     public ControlStyle GetControlStyle() => ManualControlStyle == "TopDown" ? ControlStyle.TopDown : ControlStyle.Car;
+
+    public Color GetTrackColor()
+    {
+        try { return ColorTranslator.FromHtml(TrackColor); }
+        catch { return Color.FromArgb(255, 179, 0); }
+    }
 
     public Color GetCarColor()
     {
